@@ -22,6 +22,8 @@ func main() {
 	switch os.Args[1] {
 	case "scan":
 		err = scan(os.Args[2:])
+	case "probe": // hidden diagnostic, not in usage
+		err = probe(os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return

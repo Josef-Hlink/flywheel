@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -443,7 +442,8 @@ func ridesCmd(args []string) error {
 		return err
 	}
 	if len(rides) == 0 {
-		return errors.New("no rides yet")
+		fmt.Println("no rides yet")
+		return nil
 	}
 	fmt.Printf("%4s  %-16s  %7s  %7s  %5s  %5s  %5s  %3s  %5s\n", "", "", "moving", "elapsed", "avg W", "max W", "kJ", "rpm", "km")
 	for _, r := range rides {

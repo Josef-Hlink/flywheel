@@ -21,13 +21,24 @@ func socketPath() string {
 
 // stateDir holds the remembered trainer and the background process's log.
 func stateDir() (string, error) {
-	dir := os.Getenv("XDG_STATE_HOME")
+	return xdgDir("XDG_STATE_HOME", ".local/state")
+}
+
+// dataDir holds the rides database.
+func dataDir() (string, error) {
+	return xdgDir("XDG_DATA_HOME", ".local/share")
+}
+
+// xdgDir is flywheel's directory under $env, or under ~/fallback if that's
+// unset, created if need be.
+func xdgDir(env, fallback string) (string, error) {
+	dir := os.Getenv(env)
 	if dir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
-		dir = filepath.Join(home, ".local", "state")
+		dir = filepath.Join(home, fallback)
 	}
 	dir = filepath.Join(dir, "flywheel")
 	return dir, os.MkdirAll(dir, 0o755)
@@ -42,30 +53,64 @@ type savedTrainer struct {
 
 func loadTrainer() (savedTrainer, error) {
 	var t savedTrainer
-	dir, err := stateDir()
-	if err != nil {
-		return t, err
-	}
-	b, err := os.ReadFile(filepath.Join(dir, "trainer.json"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return t, nil
-	}
-	if err != nil {
-		return t, err
-	}
-	return t, json.Unmarshal(b, &t)
+	return t, loadJSON(stateDir, "trainer.json", &t)
 }
 
 func saveTrainer(t savedTrainer) error {
-	dir, err := stateDir()
+	return saveJSON(stateDir, "trainer.json", t)
+}
+
+// defaultWeightKG stands in until you set yours.
+const defaultWeightKG = 75
+
+// rider is what the road model needs to know about you.
+type rider struct {
+	WeightKG float64 `json:"weight_kg,omitempty"`
+}
+
+// weight is the rider's weight in kg, or the default if it's unset.
+func (r rider) weight() float64 {
+	if r.WeightKG > 0 {
+		return r.WeightKG
+	}
+	return defaultWeightKG
+}
+
+func loadRider() (rider, error) {
+	var r rider
+	return r, loadJSON(dataDir, "rider.json", &r)
+}
+
+func saveRider(r rider) error {
+	return saveJSON(dataDir, "rider.json", r)
+}
+
+// loadJSON reads name in dir into v, leaving v alone if there's no file.
+func loadJSON(dir func() (string, error), name string, v any) error {
+	d, err := dir()
 	if err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(t, "", "  ")
+	b, err := os.ReadFile(filepath.Join(d, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "trainer.json"), append(b, '\n'), 0o644)
+	return json.Unmarshal(b, v)
+}
+
+func saveJSON(dir func() (string, error), name string, v any) error {
+	d, err := dir()
+	if err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(d, name), append(b, '\n'), 0o644)
 }
 
 // Socket protocol: one JSON request and one JSON response per connection.
@@ -93,7 +138,10 @@ type status struct {
 	Target  int           `json:"target"` // W in ERG, % in resistance mode
 	Power   *int16        `json:"power,omitempty"`
 	Cadence *float64      `json:"cadence,omitempty"`
-	Speed   *float64      `json:"speed,omitempty"`
-	Updated time.Time     `json:"updated"` // last Indoor Bike Data
-	Idle    time.Duration `json:"idle"`    // auto-disconnect after this long without pedalling
+	Speed   *float64      `json:"speed,omitempty"` // km/h on the road model, not the trainer's
+	Updated time.Time     `json:"updated"`         // last Indoor Bike Data
+	Idle    time.Duration `json:"idle"`            // auto-disconnect after this long without pedalling
+	// Ride is the ride so far, nil before the first pedal stroke. In the
+	// reply to disconnect it's the finished ride, with an ID if it was saved.
+	Ride *rideSummary `json:"ride,omitempty"`
 }

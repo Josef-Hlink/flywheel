@@ -41,18 +41,34 @@ func call(req request) (*status, error) {
 	return resp.Status, nil
 }
 
+// connectOpts are the flags of connect, which train shares.
+type connectOpts struct {
+	name    string
+	scanFor time.Duration
+	idle    time.Duration
+}
+
+func (o *connectOpts) flags(fs *flag.FlagSet) {
+	fs.StringVar(&o.name, "n", "", "trainer name, or part of it (default: the last one, else the strongest)")
+	fs.DurationVar(&o.scanFor, "t", 10*time.Second, "how long to scan")
+	fs.DurationVar(&o.idle, "idle", 5*time.Minute, "disconnect after this long without pedalling")
+}
+
 func connectCmd(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	name := fs.String("n", "", "trainer name, or part of it (default: the last one, else the strongest)")
-	scanFor := fs.Duration("t", 10*time.Second, "how long to scan")
-	idle := fs.Duration("idle", 5*time.Minute, "disconnect after this long without pedalling")
+	var o connectOpts
+	o.flags(fs)
 	fs.Parse(args)
 
 	if st, err := call(request{Cmd: "status"}); err == nil {
 		fmt.Printf("already connected to %s\n", st.Trainer)
 		return nil
 	}
+	return connect(o)
+}
 
+// connect starts the background process and waits for it to connect.
+func connect(o connectOpts) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -73,7 +89,7 @@ func connectCmd(args []string) error {
 	}
 	defer r.Close()
 
-	cmd := exec.Command(exe, "_daemon", "-n", *name, "-t", scanFor.String(), "-idle", idle.String())
+	cmd := exec.Command(exe, "_daemon", "-n", o.name, "-t", o.scanFor.String(), "-idle", o.idle.String())
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.ExtraFiles = []*os.File{w} // fd 3: the ready line
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -85,12 +101,12 @@ func connectCmd(args []string) error {
 	cmd.Process.Release()
 
 	// Scanning, connecting and discovery take up to ~30s when it goes badly.
-	r.SetReadDeadline(time.Now().Add(*scanFor + 45*time.Second))
+	r.SetReadDeadline(time.Now().Add(o.scanFor + 45*time.Second))
 	line, err := bufio.NewReader(r).ReadString('\n')
 	line = strings.TrimSpace(line)
 	switch {
 	case strings.HasPrefix(line, "ok "):
-		fmt.Printf("connected to %s; disconnects after %s without pedalling\n", strings.TrimPrefix(line, "ok "), *idle)
+		fmt.Printf("connected to %s; disconnects after %s without pedalling\n", strings.TrimPrefix(line, "ok "), o.idle)
 		return nil
 	case strings.HasPrefix(line, "error "):
 		return errors.New(strings.TrimPrefix(line, "error "))
@@ -115,6 +131,9 @@ func statusCmd(args []string) error {
 	}
 	fmt.Printf("%s, connected %s\n", st.Trainer, time.Since(st.Since).Round(time.Second))
 	fmt.Printf("mode     %s\n", describeMode(st.Mode, st.Target))
+	if st.Ride != nil {
+		fmt.Printf("ride     %s\n", describeRide(*st.Ride))
+	}
 	if age := time.Since(st.Updated); st.Updated.IsZero() || age > 5*time.Second {
 		fmt.Printf("no data from the trainer for %s\n", age.Round(time.Second))
 		return nil
@@ -146,23 +165,10 @@ func watchStatus() error {
 			fmt.Println()
 			return err
 		}
-		line := describeMode(st.Mode, st.Target)
-		if age := time.Since(st.Updated); st.Updated.IsZero() || age > 5*time.Second {
-			line += fmt.Sprintf("   no data for %s", age.Round(time.Second))
-		} else {
-			if st.Power != nil {
-				peak = max(peak, *st.Power)
-				line += fmt.Sprintf("   %4d W", *st.Power)
-			}
-			if st.Cadence != nil {
-				line += fmt.Sprintf("   %3.0f rpm", *st.Cadence)
-			}
-			if st.Speed != nil {
-				line += fmt.Sprintf("   %4.1f km/h", *st.Speed)
-			}
+		if st.Power != nil && fresh(st) {
+			peak = max(peak, *st.Power)
 		}
-		line += fmt.Sprintf("   peak %d W", peak)
-		fmt.Printf("\r\033[K%s", line)
+		fmt.Printf("\r\033[K%s   %s   peak %d W", describeMode(st.Mode, st.Target), liveData(st), peak)
 
 		select {
 		case <-ctx.Done():
@@ -171,6 +177,29 @@ func watchStatus() error {
 		case <-tick.C:
 		}
 	}
+}
+
+// fresh reports whether the trainer's data in st is recent enough to show.
+func fresh(st *status) bool {
+	return !st.Updated.IsZero() && time.Since(st.Updated) <= 5*time.Second
+}
+
+// liveData describes the trainer's latest power, cadence and speed.
+func liveData(st *status) string {
+	if !fresh(st) {
+		return fmt.Sprintf("no data for %s", time.Since(st.Updated).Round(time.Second))
+	}
+	var parts []string
+	if st.Power != nil {
+		parts = append(parts, fmt.Sprintf("%4d W", *st.Power))
+	}
+	if st.Cadence != nil {
+		parts = append(parts, fmt.Sprintf("%3.0f rpm", *st.Cadence))
+	}
+	if st.Speed != nil {
+		parts = append(parts, fmt.Sprintf("%4.1f km/h", *st.Speed))
+	}
+	return strings.Join(parts, "   ")
 }
 
 func describeMode(mode string, target int) string {
@@ -219,8 +248,13 @@ func parseTarget(s string) (mode string, value int, err error) {
 }
 
 func disconnectCmd(args []string) error {
+	return disconnect()
+}
+
+// disconnect releases the trainer and reports the ride it saved.
+func disconnect() error {
 	st, err := call(request{Cmd: "disconnect"})
-	if err != nil {
+	if st == nil {
 		return err
 	}
 	// Wait for the socket to go so an immediate connect doesn't see it.
@@ -231,5 +265,14 @@ func disconnectCmd(args []string) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	fmt.Printf("disconnected from %s\n", st.Trainer)
-	return nil
+	switch {
+	case err != nil:
+		// The background process retries on its way out; see its log.
+	case st.Ride == nil:
+	case st.Ride.ID == 0:
+		fmt.Printf("not saved: rides with under %s of pedalling aren't kept\n", minRide)
+	default:
+		fmt.Printf("saved ride %d: %s\n", st.Ride.ID, describeRide(*st.Ride))
+	}
+	return err
 }

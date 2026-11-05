@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,6 +26,9 @@ type daemon struct {
 	power  valueRange
 	resist *valueRange // nil if the trainer doesn't report one
 	quit   chan string
+	db     *sql.DB
+	rec    *recorder
+	rider  rider
 
 	// ctl serialises control point use. BLE callbacks never take it: they
 	// run on the CoreBluetooth delegate, which also delivers the control
@@ -37,6 +41,8 @@ type daemon struct {
 	mode    string
 	target  int
 	bike    bikeData
+	watts   float64 // last reported power, held while a notification lacks it
+	road    float64 // m/s on the road model
 	updated time.Time
 	active  time.Time // last pedalling or set
 	since   time.Time
@@ -66,6 +72,22 @@ func serveDaemon(args []string) error {
 }
 
 func (d *daemon) start(name string, scanFor time.Duration) (_ net.Listener, err error) {
+	// Before scanning, so a broken database fails connect, not the ride.
+	if d.db, err = openDB(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			d.db.Close()
+		}
+	}()
+	if d.rider, err = loadRider(); err != nil {
+		log.Printf("ignoring rider settings: %v", err)
+	}
+	if err := resummarize(d.db, d.rider.weight(), true); err != nil {
+		log.Printf("recover rides: %v", err)
+	}
+
 	addr := ""
 	if name == "" {
 		saved, err := loadTrainer()
@@ -95,6 +117,7 @@ func (d *daemon) start(name string, scanFor time.Duration) (_ net.Listener, err 
 		return nil, err
 	}
 	d.t = t
+	d.rec = newRecorder(d.db, c.name, d.rider.weight())
 	defer func() {
 		if err != nil {
 			t.close()
@@ -150,7 +173,7 @@ func (d *daemon) start(name string, scanFor time.Duration) (_ net.Listener, err 
 
 	now := time.Now()
 	d.since, d.active = now, now
-	log.Printf("connected to %s, power %d-%d W, idle timeout %s", c.name, d.power.Min, d.power.Max, d.idle)
+	log.Printf("connected to %s, power %d-%d W, idle timeout %s, rider %g kg", c.name, d.power.Min, d.power.Max, d.idle, d.rider.weight())
 	return ln, nil
 }
 
@@ -168,15 +191,21 @@ func (d *daemon) onBikeData(b []byte) {
 		log.Print(err)
 		return
 	}
-	now := time.Now()
+	s := sample{T: time.Now(), Power: bd.Power, Cadence: bd.Cadence, Speed: bd.Speed}
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.bike, d.updated = bd, now
-	// Power drops to 0 the moment you stop pedalling; speed coasts down for
-	// seconds and cadence lags, so power and cadence decide.
-	if (bd.Power != nil && *bd.Power > 0) || (bd.Cadence != nil && *bd.Cadence > 0) {
-		d.active = now
+	if !d.updated.IsZero() {
+		d.road = roadStep(d.road, d.watts, d.rider.weight(), min(s.T.Sub(d.updated), maxGap))
 	}
+	if bd.Power != nil {
+		d.watts = float64(*bd.Power)
+	}
+	d.bike, d.updated = bd, s.T
+	if s.pedalling() {
+		d.active = s.T
+	}
+	s.Mode, s.Target = d.mode, d.target
+	d.mu.Unlock()
+	d.rec.add(s)
 }
 
 func (d *daemon) run(ln net.Listener) error {
@@ -192,7 +221,7 @@ func (d *daemon) run(ln net.Listener) error {
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-	tick := time.NewTicker(10 * time.Second)
+	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 
 	var reason string
@@ -202,6 +231,9 @@ func (d *daemon) run(ln net.Listener) error {
 		case s := <-sigs:
 			reason = "got " + s.String()
 		case <-tick.C:
+			if err := d.rec.flush(); err != nil {
+				log.Printf("save ride: %v", err)
+			}
 			d.mu.Lock()
 			quiet := time.Since(d.active)
 			d.mu.Unlock()
@@ -214,6 +246,11 @@ func (d *daemon) run(ln net.Listener) error {
 	log.Printf("shutting down: %s", reason)
 	ln.Close()
 	os.Remove(socketPath())
+	// A no-op if disconnect already saved it, and a retry if it failed.
+	if _, err := d.rec.finish(); err != nil {
+		log.Print(err)
+	}
+	defer d.db.Close()
 	d.ctl.Lock()
 	if !d.released {
 		if ok, _ := d.t.dev.Connected(); ok {
@@ -239,7 +276,7 @@ func (d *daemon) serve(conn net.Conn) {
 		resp.Error = err.Error()
 	}
 	json.NewEncoder(conn).Encode(resp)
-	if req.Cmd == "disconnect" && err == nil {
+	if req.Cmd == "disconnect" {
 		d.stop("disconnect requested")
 	}
 }
@@ -290,7 +327,6 @@ func (d *daemon) handle(req request) (*status, error) {
 		return d.status(), nil
 
 	case "disconnect":
-		st := d.status()
 		d.ctl.Lock()
 		defer d.ctl.Unlock()
 		if !d.released {
@@ -299,22 +335,30 @@ func (d *daemon) handle(req request) (*status, error) {
 			}
 			d.released = true
 		}
-		return st, nil
+		st := d.status()
+		var err error
+		if st.Ride, err = d.rec.finish(); err != nil {
+			log.Print(err)
+		}
+		return st, err
 	}
 	return nil, fmt.Errorf("unknown command %q", req.Cmd)
 }
 
 func (d *daemon) status() *status {
+	ride := d.rec.live()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	speed := d.road * 3.6
 	return &status{
+		Ride:    ride,
 		Trainer: d.t.name,
 		Since:   d.since,
 		Mode:    d.mode,
 		Target:  d.target,
 		Power:   d.bike.Power,
 		Cadence: d.bike.Cadence,
-		Speed:   d.bike.Speed,
+		Speed:   &speed,
 		Updated: d.updated,
 		Idle:    d.idle,
 	}

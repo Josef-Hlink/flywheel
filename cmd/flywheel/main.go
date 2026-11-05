@@ -15,6 +15,17 @@ commands:
   set 250W      ERG mode: hold 250 W whatever your cadence or gear
   set 30%       resistance mode: fixed resistance, shift to change effort
   disconnect    release the trainer and stop the background process
+  train         ride at a prompt: type 250w, 30% or +10 while your data scrolls by
+                (connects first if need be, and then disconnects when you leave)
+  rides [-n 20] list your latest rides
+  weight [kg]   show or set your weight, for road speed (default 75 kg)
+
+Every ride with over 10 seconds of pedalling is saved to
+~/.local/share/flywheel/rides.db (under $XDG_DATA_HOME if that's set): one
+ride per connection, from your first pedal stroke to your last.
+
+Speed and distance come from your power on a flat road, as in riding apps;
+the trainer's own speed only follows your cadence.
 `
 
 func main() {
@@ -35,6 +46,12 @@ func main() {
 		err = setCmd(os.Args[2:])
 	case "disconnect":
 		err = disconnectCmd(os.Args[2:])
+	case "train":
+		err = trainCmd(os.Args[2:])
+	case "rides":
+		err = ridesCmd(os.Args[2:])
+	case "weight":
+		err = weightCmd(os.Args[2:])
 	case "probe": // hidden diagnostic, not in usage
 		err = probe(os.Args[2:])
 	case "_daemon": // spawned by connect

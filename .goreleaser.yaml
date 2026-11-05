@@ -58,9 +58,10 @@ changelog:
   use: github
   filters:
     exclude:
-      - '^docs:'
-      - '^chore:'
-      - '^test:'
+      - '^docs'
+      - '^chore'
+      - '^test'
+      - '^ci'
       - Merge pull request
       - Merge branch
 

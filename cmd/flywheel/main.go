@@ -4,7 +4,21 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 )
+
+// version is set at release time with -ldflags.
+var version = "dev"
+
+// versionString falls back on the module version that go install records.
+func versionString() string {
+	if version == "dev" {
+		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			return bi.Main.Version
+		}
+	}
+	return version
+}
 
 const usage = `usage: flywheel <command> [flags]
 
@@ -19,6 +33,7 @@ commands:
                 (connects first if need be, and then disconnects when you leave)
   rides [-n 20] list your latest rides
   weight [kg]   show or set your weight, for road speed (default 75 kg)
+  version       print flywheel's version
 
 Every ride with over 10 seconds of pedalling is saved to
 ~/.local/share/flywheel/rides.db (under $XDG_DATA_HOME if that's set): one
@@ -56,6 +71,9 @@ func main() {
 		err = probe(os.Args[2:])
 	case "_daemon": // spawned by connect
 		err = serveDaemon(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Println("flywheel", versionString())
+		return
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return

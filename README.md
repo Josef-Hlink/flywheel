@@ -179,9 +179,9 @@ the idle timeout, resets the trainer, so it never stays stuck in ERG mode.
 
 ## Compatibility
 
-Tested with a Wahoo KICKR CORE on macOS (Apple Silicon). Other FTMS trainers
-should work. The Linux builds use BlueZ and haven't been tried on a trainer
-yet.
+Tested with a Wahoo KICKR CORE and a Zwift Click v2 on macOS (Apple Silicon)
+and on Linux (NixOS, x86-64). Other FTMS trainers should work. On Linux
+flywheel talks to BlueZ, so the `bluetooth` service has to be running.
 
 ## License
 

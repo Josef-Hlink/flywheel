@@ -116,6 +116,37 @@ flywheel status -w     # one live line, with peak power
 flywheel disconnect    # release the trainer
 ```
 
+### Buttons: Zwift Click v2
+
+With `-click`, `train` and `connect` also take target changes from a Zwift
+Click v2, so you can change the effort without reaching for the keyboard:
+
+```bash
+flywheel train -click
+```
+
+Press a button on the pod with A, B, Y and Z to wake it; flywheel connects
+to it within a few seconds, and again whenever it has dozed off.
+
+| button | ERG                         | resistance mode |
+| ------ | --------------------------- | --------------- |
+| `Y`    | +10 W                       | +1%             |
+| `B`    | −10 W                       | −1%             |
+| `A`    | +50 W                       | +5%             |
+| `Z`    | −50 W                       | −5%             |
+| `+`    | switch to resistance mode   | switch to ERG   |
+
+The four face buttons sit in a diamond: up and down nudge, right and left
+take bigger steps. `+` goes back to where the other mode was left. With no target yet, any
+button starts ERG at 100 W. The buttons never take ERG past 500 W
+(`-click-max` changes that); a target you type isn't held to it.
+
+Only that pod works. The one with the arrows stays locked until the Zwift
+app has unlocked it, so flywheel leaves it alone. The pods speak Zwift's own
+undocumented protocol, worked out by
+[BikeControl](https://github.com/jonasbark/swiftcontrol); a firmware update
+may break it.
+
 ## How it works
 
 **The connection.** `connect` starts a background process that holds the

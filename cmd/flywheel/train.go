@@ -22,6 +22,8 @@ const trainHelp = `  250w     ERG: hold 250 W
   q        leave (or ctrl-d)
 `
 
+const clickHelp = "Click connected: Y B nudge by 10 W or 1%, A Z by 50 W or 5%, + switches ERG and resistance"
+
 // trainCmd is an interactive session: the trainer's data scrolls by, one
 // line per sample, while a prompt takes new targets. It connects if need
 // be, and disconnects when you leave if it did.
@@ -116,6 +118,7 @@ func feed(out io.Writer, done <-chan struct{}) {
 	defer tick.Stop()
 	var last time.Time
 	wasIdle := false
+	pod := ""
 	for {
 		select {
 		case <-done:
@@ -130,6 +133,15 @@ func feed(out io.Writer, done <-chan struct{}) {
 			}
 			fmt.Fprintf(out, "lost the trainer (see %s); ctrl-d to leave\n", logPath)
 			return
+		}
+		if st.Click != pod {
+			switch {
+			case st.Click == "connected":
+				fmt.Fprintln(out, clickHelp)
+			case pod == "connected":
+				fmt.Fprintln(out, "Click asleep or out of reach; press a button on it to wake it")
+			}
+			pod = st.Click
 		}
 		if st.Updated.IsZero() || st.Updated.Equal(last) {
 			continue

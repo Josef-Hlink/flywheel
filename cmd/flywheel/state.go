@@ -141,6 +141,7 @@ type status struct {
 	Speed   *float64      `json:"speed,omitempty"` // km/h on the road model, not the trainer's
 	Updated time.Time     `json:"updated"`         // last Indoor Bike Data
 	Idle    time.Duration `json:"idle"`            // auto-disconnect after this long without pedalling
+	Click   string        `json:"click,omitempty"` // searching or connected, if a Zwift Click pod was asked for
 	// Ride is the ride so far, nil before the first pedal stroke. In the
 	// reply to disconnect it's the finished ride, with an ID if it was saved.
 	Ride *rideSummary `json:"ride,omitempty"`

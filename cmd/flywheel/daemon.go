@@ -30,6 +30,9 @@ type daemon struct {
 	rec    *recorder
 	rider  rider
 
+	click    *click // nil unless asked for
+	clickMax int    // the buttons' ERG ceiling, W
+
 	// ctl serialises control point use. BLE callbacks never take it: they
 	// run on the CoreBluetooth delegate, which also delivers the control
 	// point responses that a ctl holder waits for.
@@ -40,6 +43,7 @@ type daemon struct {
 	mu      sync.Mutex // guards the fields below; held only briefly
 	mode    string
 	target  int
+	last    map[string]int // the latest target of each mode
 	bike    bikeData
 	watts   float64 // last reported power, held while a notification lacks it
 	road    float64 // m/s on the road model
@@ -55,12 +59,14 @@ func serveDaemon(args []string) error {
 	name := fs.String("n", "", "trainer name")
 	scanFor := fs.Duration("t", 10*time.Second, "how long to scan")
 	idle := fs.Duration("idle", 5*time.Minute, "disconnect after this long without pedalling")
+	useClick := fs.Bool("click", false, "take target changes from a Zwift Click v2 pod")
+	clickMax := fs.Int("click-max", defaultClickMax, "the highest ERG target the pod's buttons go to, W")
 	fs.Parse(args)
 
 	log.SetFlags(log.LstdFlags)
 	ready := os.NewFile(3, "ready")
-	d := &daemon{idle: *idle, quit: make(chan string, 1)}
-	ln, err := d.start(*name, *scanFor)
+	d := &daemon{idle: *idle, quit: make(chan string, 1), last: map[string]int{}, clickMax: *clickMax}
+	ln, err := d.start(*name, *scanFor, *useClick)
 	if err != nil {
 		fmt.Fprintf(ready, "error %v\n", err)
 		ready.Close()
@@ -71,7 +77,7 @@ func serveDaemon(args []string) error {
 	return d.run(ln)
 }
 
-func (d *daemon) start(name string, scanFor time.Duration) (_ net.Listener, err error) {
+func (d *daemon) start(name string, scanFor time.Duration, useClick bool) (_ net.Listener, err error) {
 	// Before scanning, so a broken database fails connect, not the ride.
 	if d.db, err = openDB(); err != nil {
 		return nil, err
@@ -101,10 +107,19 @@ func (d *daemon) start(name string, scanFor time.Duration) (_ net.Listener, err 
 	if err := adapter.Enable(); err != nil {
 		return nil, fmt.Errorf("enable bluetooth: %w", err)
 	}
-	adapter.SetConnectionStateHandler(func(_ bluetooth.Device, s bluetooth.ConnectionState) {
-		if !s.Connected {
-			d.stop(fmt.Sprintf("trainer disconnected (%v)", s.Err))
+	if useClick {
+		d.click = newClick(adapter)
+	}
+	adapter.SetConnectionStateHandler(func(dev bluetooth.Device, s bluetooth.ConnectionState) {
+		if s.Connected {
+			return
 		}
+		// The pod sleeps and wakes as it likes; only the trainer going ends
+		// the session.
+		if d.click != nil && d.click.disconnected(dev.Address.String()) {
+			return
+		}
+		d.stop(fmt.Sprintf("trainer disconnected (%v)", s.Err))
 	})
 
 	c, err := findTrainer(adapter, name, addr, scanFor)
@@ -174,6 +189,13 @@ func (d *daemon) start(name string, scanFor time.Duration) (_ net.Listener, err 
 	now := time.Now()
 	d.since, d.active = now, now
 	log.Printf("connected to %s, power %d-%d W, idle timeout %s, rider %g kg", c.name, d.power.Min, d.power.Max, d.idle, d.rider.weight())
+	if d.click != nil {
+		// Only now: the adapter runs one scan at a time, and the trainer's
+		// came first.
+		go d.click.run()
+		go d.followClick()
+		log.Printf("click: looking for the pod, buttons go up to %d W", d.clickMax)
+	}
 	return ln, nil
 }
 
@@ -182,6 +204,24 @@ func (d *daemon) stop(reason string) {
 	select {
 	case d.quit <- reason:
 	default:
+	}
+}
+
+// followClick turns the pod's button presses into targets.
+func (d *daemon) followClick() {
+	for btn := range d.click.presses {
+		d.mu.Lock()
+		mode, value, ok := clickTarget(btn, d.mode, d.target, d.last, min(d.clickMax, int(d.power.Max)))
+		d.mu.Unlock()
+		if !ok {
+			log.Printf("click: %s changes nothing", btn)
+			continue
+		}
+		if _, err := d.handle(request{Cmd: "set", Mode: mode, Value: value}); err != nil {
+			log.Printf("click: %s: %v", btn, err)
+			continue
+		}
+		log.Printf("click: %s", btn)
 	}
 }
 
@@ -251,6 +291,9 @@ func (d *daemon) run(ln net.Listener) error {
 		log.Print(err)
 	}
 	defer d.db.Close()
+	if d.click != nil {
+		d.click.close()
+	}
 	d.ctl.Lock()
 	if !d.released {
 		if ok, _ := d.t.dev.Connected(); ok {
@@ -323,6 +366,7 @@ func (d *daemon) handle(req request) (*status, error) {
 		log.Printf("set %s %d", req.Mode, req.Value)
 		d.mu.Lock()
 		d.mode, d.target, d.active = req.Mode, req.Value, time.Now()
+		d.last[req.Mode] = req.Value
 		d.mu.Unlock()
 		return d.status(), nil
 
@@ -350,7 +394,12 @@ func (d *daemon) status() *status {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	speed := d.road * 3.6
+	pod := ""
+	if d.click != nil {
+		pod = d.click.status()
+	}
 	return &status{
+		Click:   pod,
 		Ride:    ride,
 		Trainer: d.t.name,
 		Since:   d.since,

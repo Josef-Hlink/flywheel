@@ -31,6 +31,7 @@ commands:
   disconnect    release the trainer and stop the background process
   train         ride at a prompt: type 250w, 30% or +10 while your data scrolls by
                 (connects first if need be, and then disconnects when you leave)
+                -click: a Zwift Click v2's A/B/Y/Z pod nudges the target too
   rides [-n 20] list your latest rides
   weight [kg]   show or set your weight, for road speed (default 75 kg)
   version       print flywheel's version

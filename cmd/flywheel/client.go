@@ -46,12 +46,20 @@ type connectOpts struct {
 	name    string
 	scanFor time.Duration
 	idle    time.Duration
+	click   bool
+	clickMx int
 }
+
+// defaultClickMax is how high the pod's buttons take ERG unless told
+// otherwise: past most riders' steady efforts, short of a runaway.
+const defaultClickMax = 500
 
 func (o *connectOpts) flags(fs *flag.FlagSet) {
 	fs.StringVar(&o.name, "n", "", "trainer name, or part of it (default: the last one, else the strongest)")
 	fs.DurationVar(&o.scanFor, "t", 10*time.Second, "how long to scan")
 	fs.DurationVar(&o.idle, "idle", 5*time.Minute, "disconnect after this long without pedalling")
+	fs.BoolVar(&o.click, "click", false, "take target changes from a Zwift Click v2: the pod with A, B, Y, Z and +")
+	fs.IntVar(&o.clickMx, "click-max", defaultClickMax, "the highest ERG target the pod's buttons go to, W")
 }
 
 func connectCmd(args []string) error {
@@ -89,7 +97,8 @@ func connect(o connectOpts) error {
 	}
 	defer r.Close()
 
-	cmd := exec.Command(exe, "_daemon", "-n", o.name, "-t", o.scanFor.String(), "-idle", o.idle.String())
+	cmd := exec.Command(exe, "_daemon", "-n", o.name, "-t", o.scanFor.String(), "-idle", o.idle.String(),
+		fmt.Sprintf("-click=%t", o.click), "-click-max", strconv.Itoa(o.clickMx))
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.ExtraFiles = []*os.File{w} // fd 3: the ready line
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -107,6 +116,9 @@ func connect(o connectOpts) error {
 	switch {
 	case strings.HasPrefix(line, "ok "):
 		fmt.Printf("connected to %s; disconnects after %s without pedalling\n", strings.TrimPrefix(line, "ok "), o.idle)
+		if o.click {
+			fmt.Println("looking for the Click: press a button on the A/B/Y/Z pod to wake it")
+		}
 		return nil
 	case strings.HasPrefix(line, "error "):
 		return errors.New(strings.TrimPrefix(line, "error "))
